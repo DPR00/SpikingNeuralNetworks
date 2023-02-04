@@ -1,5 +1,5 @@
-./datasets
-./tutorials/spikingJelly/logs
-./tutorials/spikingJelly/datasets
-./tutorials/spikingJelly/__pycache__
-./tutorials/pyTorch/dl-pytorch
+datasets
+tutorials/spikingJelly/logs
+tutorials/spikingJelly/datasets
+tutorials/spikingJelly/__pycache__
+tutorials/pyTorch/dl-pytorch
