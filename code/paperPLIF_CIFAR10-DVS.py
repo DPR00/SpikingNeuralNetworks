@@ -1,4 +1,5 @@
 import sys
+#sys.path.append('/content/drive/MyDrive/Colab Notebooks/ELAP/SNN/spikingjelly/')
 import os
 import time
 import argparse
@@ -13,107 +14,81 @@ from torch.utils.tensorboard import SummaryWriter
 
 from spikingjelly.activation_based.neuron import BaseNode, LIFNode
 from spikingjelly.activation_based import functional, surrogate, neuron, layer
-from spikingjelly.datasets.dvs128_gesture import DVS128Gesture
+from spikingjelly.datasets.cifar10_dvs import CIFAR10DVS
 import math
 
 class PLIFNode(BaseNode):
-    def __init__(self, init_tau=2.0, v_threshold=1.0, v_reset=0.0, detach_reset=True, surrogate_function=surrogate.ATan(), monitor_state=False):
+    def __init__(self, init_tau=2.0, v_threshold=1.0, v_reset=0.0, surrogate_function=surrogate.ATan(), detach_reset=True):
         super().__init__(v_threshold, v_reset, surrogate_function, detach_reset)
         init_w = - math.log(init_tau - 1)
         self.w = nn.Parameter(torch.tensor(init_w, dtype=torch.float))
 
-    def forward(self, dv: torch.Tensor):
+    def neuronal_charge(self, dv: torch.Tensor):
         if self.v_reset is None:
             # self.v += dv - self.v * self.w.sigmoid()
             self.v += (dv - self.v) * self.w.sigmoid()
         else:
             # self.v += dv - (self.v - self.v_reset) * self.w.sigmoid()
             self.v += (dv - (self.v - self.v_reset)) * self.w.sigmoid()
-        return self.spiking()
-
+        
     def tau(self):
         return 1 / self.w.data.sigmoid().item()
 
     def extra_repr(self):
         return f'v_threshold={self.v_threshold}, v_reset={self.v_reset}, tau={self.tau()}'
 
-def create_conv_sequential(in_channels, out_channels, number_layer, init_tau, use_plif, use_max_pool, detach_reset):
-    # 首层是in_channels-out_channels
-    # 剩余number_layer - 1层都是out_channels-out_channels
-    conv = [
-        nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1, bias=False),
-        nn.BatchNorm2d(out_channels),
-        PLIFNode(init_tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset) if use_plif else LIFNode(tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset),
-        nn.MaxPool2d(2, 2) if use_max_pool else nn.AvgPool2d(2, 2)
-    ]
-
-    for i in range(number_layer - 1):
-        conv.extend([
-            nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-        PLIFNode(init_tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset) if use_plif else LIFNode(tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset),
-            nn.MaxPool2d(2, 2) if use_max_pool else nn.AvgPool2d(2, 2)
-        ])
-    return nn.Sequential(*conv)
-
-
-def create_2fc(channels, h, w, dpp, class_num, init_tau, use_plif, detach_reset):
-    return nn.Sequential(
-        nn.Flatten(),
-        layer.Dropout(dpp),
-        nn.Linear(channels * h * w, channels * h * w // 4, bias=False),
-        PLIFNode(init_tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset) if use_plif else LIFNode(tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset),
-        layer.Dropout(dpp),
-        nn.Linear(channels * h * w // 4, class_num * 10, bias=False),
-        PLIFNode(init_tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset) if use_plif else LIFNode(tau=init_tau, surrogate_function=surrogate.ATan(), detach_reset=detach_reset),
-    )
-
-
-class NeuromorphicNet(nn.Module):
-    def __init__(self, T, init_tau, use_plif, use_max_pool, detach_reset):
+class CIFAR10DVSNet(nn.Module):
+    def __init__(self, channels=128, spiking_neuron: callable = None, *args, **kwargs):
         super().__init__()
-        self.T = T
-        self.init_tau = init_tau
-        self.use_plif = use_plif
-        self.use_max_pool = use_max_pool
-        self.detach_reset = detach_reset
 
-        self.train_times = 0
-        self.max_test_accuracy = 0
-        self.epoch = 0
-        self.conv = None
-        self.fc = None
-        self.boost = nn.AvgPool1d(10, 10)
+        conv = []
+        number_layer = 4
+       
 
-    def forward(self, x):
-        x = x.permute(1, 0, 2, 3, 4)  # [T, N, 2, *, *]
-        out_spikes_counter = self.boost(self.fc(self.conv(x[0])).unsqueeze(1)).squeeze(1)
-        for t in range(1, x.shape[0]):
-            out_spikes_counter += self.boost(self.fc(self.conv(x[t])).unsqueeze(1)).squeeze(1)
-        return out_spikes_counter
+        for i in range(number_layer):
+            if conv.__len__() == 0:
+                in_channels = 2
+            else:
+                in_channels = channels
+        
+            conv.append(layer.Conv2d(in_channels, channels, kernel_size=3, padding=1, bias=False))
+            conv.append(layer.BatchNorm2d(channels))
+            conv.append(PLIFNode())
+            conv.append(layer.MaxPool2d(2,2))
+        
+        h, w = 128, 128
+        h = h >> number_layer
+        w = w >> number_layer
 
-class DVS128GestureNet(NeuromorphicNet):
-    def __init__(self, T, init_tau, use_plif, use_max_pool, detach_reset, channels, number_layer):
-        super().__init__(T=T, init_tau=init_tau, use_plif=use_plif, use_max_pool=use_max_pool, detach_reset=detach_reset)
-        w = 128
-        h = 128
-        self.conv = create_conv_sequential(2, channels, number_layer=number_layer, init_tau=init_tau, use_plif=use_plif,
-                                        use_max_pool=use_max_pool, detach_reset=detach_reset)
-        self.fc = create_2fc(channels=channels, w=w >> number_layer, h=h >> number_layer, dpp=0.5, class_num=11,
-                            init_tau=init_tau, use_plif=use_plif, detach_reset=detach_reset)
+        self.conv_fc = nn.Sequential(
+                            *conv,
+                            
+                            layer.Flatten(),
+                            layer.Dropout(0.5),
+                            layer.Linear(channels*h*w, channels*h*w//4, bias=False),
+                            PLIFNode(),
 
+                            layer.Dropout(0.5),
+                            layer.Linear(channels*h*w//4, 10*10), #1 num_classes = 10
+                            PLIFNode(),
+
+                            layer.VotingLayer(10)
+                        )
+
+    def forward(self, x: torch.Tensor):
+        return self.conv_fc(x)
 
 def main():
-    
-    parser = argparse.ArgumentParser(description='Classify DVS Gesture')
+
+    parser = argparse.ArgumentParser(description='Classify CIFAR 10 DVS')
 
     parser.add_argument('-init_tau', type=float, default=2.0)
     parser.add_argument('-T', default = 16, type=int, help='simulating time-steps')
-    parser.add_argument('-device', default='cuda:1', help='device')
-    parser.add_argument('-b', default=16, type=int, help='batch size')
+    parser.add_argument('-device', default='cuda:0', help='device')
+    parser.add_argument('-b', default=4, type=int, help='batch size')
     parser.add_argument('-epochs', default=64, type=int, metavar='N', help='number of data loading workers')
     parser.add_argument('-j', default=8, type=int, metavar='N', help='number of data loading workers (default:8)')
-    parser.add_argument('-data-dir', type=str, default='./datasets/DVSGesture/', help='root dir of MNIST dataset')
+    parser.add_argument('-data-dir', type=str, default='./datasets/CIFAR10DVS', help='root dir of MNIST dataset')
     parser.add_argument('-out-dir', type=str, default='./logs', help='root dir for saving logs and checkpoint')
     parser.add_argument('-resume', type=str, help='resume from the checkpoint path')
     parser.add_argument('-cupy', action='store_true', help='use cupy backend')
@@ -127,7 +102,7 @@ def main():
     args = parser.parse_args()
     print(args)
 
-    net = DVS128GestureNet(T = args.T, init_tau=args.init_tau, use_plif=True, use_max_pool=True, detach_reset = True, channels=args.channels, number_layer=8)
+    net = CIFAR10DVSNet(channels=args.channels)
 
     functional.set_step_mode(net, 'm')
     if args.cupy:
@@ -137,9 +112,9 @@ def main():
 
     net.to(args.device)
 
-    train_set = DVS128Gesture(root=args.data_dir, train = True, data_type='frame', frames_number=args.T, split_by='number')
+    train_set = CIFAR10DVS(root=args.data_dir, data_type='frame', frames_number=args.T, split_by='number')
     #print(train_set)
-    test_set = DVS128Gesture(root=args.data_dir, train=False, data_type='frame', frames_number=args.T, split_by='number')
+    test_set = CIFAR10DVS(root=args.data_dir, data_type='frame', frames_number=args.T, split_by='number')
 
 
     train_data_loader = torch.utils.data.DataLoader(
@@ -184,7 +159,7 @@ def main():
         start_epoch = checkpoint['epoch'] + 1
         max_test_acc = checkpoint['max_test_acc']
 
-    out_dir = os.path.join(args.out_dir, f'DVSNet_PLIF_T{args.T}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}_b{args.b}_ep{args.epochs}')
+    out_dir = os.path.join(args.out_dir, f'CIFAR10DVSNet_PLIF_T{args.T}_b{args.b}_{args.opt}_lr{args.lr}_c{args.channels}_b{args.b}_ep{args.epochs}')
 
     if args.amp:
         out_dir += '_amp'
@@ -215,7 +190,7 @@ def main():
             frame = frame.to(args.device)
             frame = frame.transpose(0, 1)
             label = label.to(args.device)
-            label_onehot = F.one_hot(label, 11).float()
+            label_onehot = F.one_hot(label, 10).float()
 
             if scaler is not None:
                 with amp.autocast():
@@ -255,7 +230,7 @@ def main():
                 frame = frame.to(args.device)
                 frame = frame.transpose(0, 1)
                 label = label.to(args.device)
-                label_onehot = F.one_hot(label, 11).float()
+                label_onehot = F.one_hot(label, 10).float()
                 out_fr = net(frame).mean(0)
                 loss = F.mse_loss(out_fr, label_onehot)
                 test_samples += label.numel()
