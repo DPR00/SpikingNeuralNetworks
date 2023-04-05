@@ -1,0 +1,1 @@
+This repository contains files related to the training of SNNs for object recognition using SpikingJelly library and PyTorch.
